@@ -10,6 +10,8 @@ function makePool(overrides: Partial<PoolSnapshot> = {}): PoolSnapshot {
     token1: "0x0000000000000000000000000000000000000022",
     token0Symbol: "WETH",
     token1Symbol: "USDC",
+    token0Decimals: 18,
+    token1Decimals: 6,
     fee: 500,
     liquidity: 1_000_000_000_000n,
     currentTick: 120,

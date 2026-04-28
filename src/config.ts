@@ -4,6 +4,8 @@ import type { Address } from "viem";
 import type { Env, RuntimeConfig } from "./types";
 
 const DEFAULT_FACTORY = "0x0227628f3F023bb0B980b67D528571c95c6DaC1c";
+const DEFAULT_UNISWAP_TRADE_API_BASE = "https://trade-api.gateway.uniswap.org";
+const DEFAULT_UNISWAP_AI_CONTEXT_URL = "https://developers.uniswap.org/docs/uniswap-ai/llms.txt";
 
 function requireString(value: string | undefined, key: string): string {
   if (!value || value.trim().length === 0) {
@@ -91,5 +93,22 @@ export function loadConfig(env: Env): RuntimeConfig {
     maxCandidatePools: parseIntFromEnv(env.MAX_CANDIDATE_POOLS, 80, "MAX_CANDIDATE_POOLS", 10, 250),
     evaluationPoolLimit: parseIntFromEnv(env.EVALUATION_POOL_LIMIT, 16, "EVALUATION_POOL_LIMIT", 3, 50),
     minLiquidity: parseBigIntFromEnv(env.MIN_LIQUIDITY, 100_000n, "MIN_LIQUIDITY", 1n),
+    uniswapApiKey: env.UNISWAP_API_KEY && env.UNISWAP_API_KEY.trim().length > 0 ? env.UNISWAP_API_KEY.trim() : undefined,
+    uniswapTradeApiBase:
+      env.UNISWAP_TRADE_API_BASE && env.UNISWAP_TRADE_API_BASE.trim().length > 0
+        ? env.UNISWAP_TRADE_API_BASE.trim().replace(/\/+$/, "")
+        : DEFAULT_UNISWAP_TRADE_API_BASE,
+    uniswapV3SubgraphUrl:
+      env.UNISWAP_V3_SUBGRAPH_URL && env.UNISWAP_V3_SUBGRAPH_URL.trim().length > 0
+        ? env.UNISWAP_V3_SUBGRAPH_URL.trim()
+        : undefined,
+    uniswapV4SubgraphUrl:
+      env.UNISWAP_V4_SUBGRAPH_URL && env.UNISWAP_V4_SUBGRAPH_URL.trim().length > 0
+        ? env.UNISWAP_V4_SUBGRAPH_URL.trim()
+        : undefined,
+    uniswapAiContextUrl:
+      env.UNISWAP_AI_CONTEXT_URL && env.UNISWAP_AI_CONTEXT_URL.trim().length > 0
+        ? env.UNISWAP_AI_CONTEXT_URL.trim()
+        : DEFAULT_UNISWAP_AI_CONTEXT_URL,
   };
 }

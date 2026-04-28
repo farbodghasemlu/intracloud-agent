@@ -1,3 +1,6 @@
+import { Token } from "@uniswap/sdk-core";
+import { tickToPrice } from "@uniswap/v3-sdk";
+
 import type { Direction, PoolScore, PoolSnapshot, RoundPlan } from "./types";
 
 const FEE_SCORE: Record<number, number> = {
@@ -7,12 +10,39 @@ const FEE_SCORE: Record<number, number> = {
   10000: 0.55,
 };
 
+const CHAIN_ID = 11155111;
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function safeNumber(value: string): number | null {
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    return null;
+  }
+  return num;
+}
+
+function derivePriceDriftPct(pool: PoolSnapshot): number {
+  try {
+    const token0 = new Token(CHAIN_ID, pool.token0, pool.token0Decimals, pool.token0Symbol);
+    const token1 = new Token(CHAIN_ID, pool.token1, pool.token1Decimals, pool.token1Symbol);
+
+    const shortPrice = safeNumber(tickToPrice(token0, token1, pool.shortTwapTick).toSignificant(12));
+    const longPrice = safeNumber(tickToPrice(token0, token1, pool.longTwapTick).toSignificant(12));
+    if (shortPrice === null || longPrice === null || longPrice === 0) {
+      return 0;
+    }
+
+    return ((shortPrice - longPrice) / longPrice) * 100;
+  } catch {
+    return 0;
+  }
 }
 
 function scoreLiquidity(liquidity: bigint): number {
@@ -47,19 +77,21 @@ function scoreActivity(swapCountRecent: number): number {
 }
 
 export function scorePool(pool: PoolSnapshot): PoolScore {
+  const sdkPriceDriftPct = derivePriceDriftPct(pool);
   const liquidityScore = scoreLiquidity(pool.liquidity);
   const stability = scoreStability(pool.shortTwapTick, pool.longTwapTick);
   const oracleDepth = scoreOracleDepth(pool.observationCardinality);
   const activity = scoreActivity(pool.swapCountRecent);
   const feeScore = FEE_SCORE[pool.fee] ?? 0.5;
   const signal = scoreSignal(pool.currentTick, pool.shortTwapTick, pool.longTwapTick);
+  const sdkDriftSignal = clamp(Math.abs(sdkPriceDriftPct) / 4, 0, 1);
 
   const stabilityScore = clamp(0.7 * stability + 0.3 * liquidityScore, 0, 1);
   const manipulationScore = clamp(0.6 * liquidityScore + 0.4 * oracleDepth, 0, 1);
   const profitabilityScore = clamp(0.7 * activity + 0.3 * feeScore, 0, 1);
 
   const totalScore = clamp(
-    0.45 * stabilityScore + 0.3 * manipulationScore + 0.15 * profitabilityScore + 0.1 * signal,
+    0.43 * stabilityScore + 0.3 * manipulationScore + 0.15 * profitabilityScore + 0.07 * signal + 0.05 * sdkDriftSignal,
     0,
     1,
   );
@@ -70,6 +102,7 @@ export function scorePool(pool: PoolSnapshot): PoolScore {
     `manipulation=${round2(manipulationScore)}`,
     `profitability=${round2(profitabilityScore)}`,
     `signal=${round2(signal)}`,
+    `sdkPriceDriftPct=${round2(sdkPriceDriftPct)}`,
     `driftTicks=${pool.shortTwapTick - pool.longTwapTick}`,
     `swapsRecent=${pool.swapCountRecent}`,
   ];

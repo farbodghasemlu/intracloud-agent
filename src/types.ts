@@ -19,6 +19,12 @@ export interface Env {
   MAX_CANDIDATE_POOLS?: string;
   EVALUATION_POOL_LIMIT?: string;
   MIN_LIQUIDITY?: string;
+
+  UNISWAP_API_KEY?: string;
+  UNISWAP_TRADE_API_BASE?: string;
+  UNISWAP_V3_SUBGRAPH_URL?: string;
+  UNISWAP_V4_SUBGRAPH_URL?: string;
+  UNISWAP_AI_CONTEXT_URL?: string;
 }
 
 export type Direction = "UP" | "DOWN";
@@ -36,6 +42,12 @@ export interface RuntimeConfig {
   maxCandidatePools: number;
   evaluationPoolLimit: number;
   minLiquidity: bigint;
+
+  uniswapApiKey: string | undefined;
+  uniswapTradeApiBase: string;
+  uniswapV3SubgraphUrl: string | undefined;
+  uniswapV4SubgraphUrl: string | undefined;
+  uniswapAiContextUrl: string;
 }
 
 export interface PoolCache {
@@ -61,6 +73,8 @@ export interface PoolSnapshot {
   token1: Address;
   token0Symbol: string;
   token1Symbol: string;
+  token0Decimals: number;
+  token1Decimals: number;
   fee: number;
   liquidity: bigint;
   currentTick: number;
@@ -113,6 +127,49 @@ export interface AnalysisRecord {
     profitabilityScore: number;
     signalScore: number;
   }>;
+  integrations?: {
+    used: string[];
+    uniswapApiQuote?: {
+      routing: string;
+      routeString?: string | undefined;
+      includesV4: boolean;
+      v4PoolIdValidated?: boolean | undefined;
+      priceImpact?: number | undefined;
+      gasFeeUsd?: string | undefined;
+    };
+    v4Market?: {
+      poolCount?: string | undefined;
+      txCount?: string | undefined;
+      totalVolumeUSD?: string | undefined;
+      totalFeesUSD?: string | undefined;
+      totalValueLockedUSD?: string | undefined;
+    };
+  };
+}
+
+export interface V3SubgraphPoolCandidate {
+  id: Address;
+  feeTier: number;
+  totalValueLockedUSD: string;
+  volumeUSD: string;
+  txCount: string;
+}
+
+export interface V4SubgraphMarketSnapshot {
+  poolCount?: string | undefined;
+  txCount?: string | undefined;
+  totalVolumeUSD?: string | undefined;
+  totalFeesUSD?: string | undefined;
+  totalValueLockedUSD?: string | undefined;
+}
+
+export interface UniswapApiQuoteProbe {
+  routing: string;
+  routeString?: string | undefined;
+  includesV4: boolean;
+  v4PoolIdValidated?: boolean | undefined;
+  priceImpact?: number | undefined;
+  gasFeeUsd?: string | undefined;
 }
 
 export interface EndedRoundRecord {

@@ -13,6 +13,12 @@ import { sepolia } from "viem/chains";
 import { buildRoundPlan, pickTopPools, scorePool } from "./analysis";
 import { erc20MetadataAbi, predictionMarketAbi, uniswapV3FactoryAbi, uniswapV3PoolAbi } from "./abi";
 import { loadConfig } from "./config";
+import {
+  fetchUniswapAiContextSnippet,
+  fetchUniswapApiQuoteProbe,
+  fetchV3SubgraphPoolCandidates,
+  fetchV4SubgraphMarketSnapshot,
+} from "./uniswap";
 import type {
   AgentRunResult,
   AnalysisRecord,
@@ -25,6 +31,8 @@ import type {
   RoundPlan,
   RoundState,
   RuntimeConfig,
+  UniswapApiQuoteProbe,
+  V4SubgraphMarketSnapshot,
 } from "./types";
 
 const MODEL = "@cf/meta/llama-3.1-8b-instruct";
@@ -35,6 +43,7 @@ const KV_KEYS = {
   recentRounds: "rounds:recent",
   stats: "agent:stats",
   pools: "agent:pools:v1",
+  aiContext: "agent:uniswap-ai-context:v1",
 } as const;
 
 const MAX_RECENT_ROUNDS = 30;
@@ -104,6 +113,18 @@ function clampRound(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function buildQuoteProbeAmount(decimals: number): string {
+  const safeDecimals = clampNumber(Math.trunc(decimals), 0, 18);
+  // Keep probe sizes moderate on testnets to reduce "No quote" due oversized input.
+  const probeDecimals = safeDecimals > 10 ? 10 : safeDecimals;
+  const amount = 10n ** BigInt(probeDecimals);
+  return amount.toString();
+}
+
 function getClients(config: RuntimeConfig) {
   const account = privateKeyToAccount(config.privateKey);
   const transport = http(config.rpcUrl, { timeout: 20_000, retryCount: 2 });
@@ -152,6 +173,17 @@ async function getPoolUniverse(
 
   const poolSet = new Set<Address>(cached?.pools ?? []);
 
+  if (config.uniswapV3SubgraphUrl) {
+    try {
+      const subgraphPools = await fetchV3SubgraphPoolCandidates(config.uniswapV3SubgraphUrl, config.maxCandidatePools);
+      for (const pool of subgraphPools) {
+        poolSet.add(pool.id);
+      }
+    } catch {
+      // Continue with onchain discovery if subgraph endpoint is unavailable or mismatched.
+    }
+  }
+
   if (fromBlock <= latestBlock) {
     const logs = await publicClient.getLogs({
       address: config.factoryAddress,
@@ -178,14 +210,15 @@ async function getPoolUniverse(
   return { pools, blockNumber: latestBlock };
 }
 
-async function fetchTokenSymbols(
+async function fetchTokenMetadata(
   publicClient: ReturnType<typeof createPublicClient>,
   tokenAddresses: Address[],
-): Promise<Map<Address, string>> {
+): Promise<{ symbols: Map<Address, string>; decimals: Map<Address, number> }> {
   const symbols = new Map<Address, string>();
+  const decimals = new Map<Address, number>();
 
   if (tokenAddresses.length === 0) {
-    return symbols;
+    return { symbols, decimals };
   }
 
   const symbolCalls = tokenAddresses.map((token) => ({
@@ -199,14 +232,32 @@ async function fetchTokenSymbols(
     allowFailure: true,
   });
 
+  const decimalCalls = tokenAddresses.map((token) => ({
+    address: token,
+    abi: erc20MetadataAbi,
+    functionName: "decimals" as const,
+  }));
+
+  const decimalResults = await publicClient.multicall({
+    contracts: decimalCalls,
+    allowFailure: true,
+  });
+
   for (let i = 0; i < tokenAddresses.length; i += 1) {
     const token = tokenAddresses[i];
-    const result = symbolResults[i];
-    const symbol = result.status === "success" && typeof result.result === "string" ? result.result : undefined;
+    const symbolResult = symbolResults[i];
+    const decimalResult = decimalResults[i];
+
+    const symbol =
+      symbolResult.status === "success" && typeof symbolResult.result === "string" ? symbolResult.result : undefined;
+    const tokenDecimals =
+      decimalResult.status === "success" && typeof decimalResult.result === "number" ? decimalResult.result : 18;
+
     symbols.set(token, safeSymbol(symbol, token));
+    decimals.set(token, tokenDecimals);
   }
 
-  return symbols;
+  return { symbols, decimals };
 }
 
 async function fetchSwapActivity(
@@ -347,8 +398,8 @@ async function fetchPoolSnapshots(
     return [];
   }
 
-  const [symbolMap, swapActivityMap] = await Promise.all([
-    fetchTokenSymbols(publicClient, [...tokenAddresses]),
+  const [{ symbols: symbolMap, decimals: decimalMap }, swapActivityMap] = await Promise.all([
+    fetchTokenMetadata(publicClient, [...tokenAddresses]),
     fetchSwapActivity(publicClient, rows.map((row) => row.pool), latestBlock, config.swapActivityLookbackBlocks),
   ]);
 
@@ -374,6 +425,8 @@ async function fetchPoolSnapshots(
     const row = rows[i];
     const token0Symbol = symbolMap.get(row.token0) ?? safeSymbol(undefined, row.token0);
     const token1Symbol = symbolMap.get(row.token1) ?? safeSymbol(undefined, row.token1);
+    const token0Decimals = decimalMap.get(row.token0) ?? 18;
+    const token1Decimals = decimalMap.get(row.token1) ?? 18;
 
     snapshots.push({
       pool: row.pool,
@@ -381,6 +434,8 @@ async function fetchPoolSnapshots(
       token1: row.token1,
       token0Symbol,
       token1Symbol,
+      token0Decimals,
+      token1Decimals,
       fee: row.fee,
       liquidity: row.liquidity,
       currentTick: row.currentTick,
@@ -394,8 +449,34 @@ async function fetchPoolSnapshots(
   return snapshots;
 }
 
+async function getCachedUniswapAiContext(kv: KVNamespace, config: RuntimeConfig): Promise<string | null> {
+  type Cache = { fetchedAt: string; snippet: string };
+  const cached = await readJson<Cache | null>(kv, KV_KEYS.aiContext, null);
+  const now = Date.now();
+
+  if (cached?.snippet && cached.snippet.trim().length > 0) {
+    const fetchedAt = Number.parseInt(cached.fetchedAt, 10);
+    if (Number.isFinite(fetchedAt) && now - fetchedAt < 24 * 60 * 60 * 1000) {
+      return cached.snippet;
+    }
+  }
+
+  const snippet = await fetchUniswapAiContextSnippet(config.uniswapAiContextUrl, 1400);
+  if (!snippet) {
+    return cached?.snippet ?? null;
+  }
+
+  await writeJson(kv, KV_KEYS.aiContext, {
+    fetchedAt: String(now),
+    snippet,
+  } satisfies Cache);
+
+  return snippet;
+}
+
 async function generateLlamaStatement(
   env: Env,
+  aiContextSnippet: string | null,
   plan: RoundPlan,
   score: PoolScore,
 ): Promise<string> {
@@ -410,6 +491,9 @@ async function generateLlamaStatement(
         {
           role: "user",
           content: [
+            aiContextSnippet
+              ? `Uniswap context excerpt (for terminology consistency only): ${aiContextSnippet}`
+              : "Use standard Uniswap terminology.",
             `Pair: ${plan.pair}`,
             `Direction: ${plan.direction}`,
             `Duration minutes: ${Math.round(plan.durationSeconds / 60)}`,
@@ -615,9 +699,58 @@ async function runAgent(env: Env, trigger: "scheduled" | "manual"): Promise<Agen
     if (!state.activeRoundId) {
       const { analysis, selectedScore } = await buildAnalysis(publicClient, config, env.AGENT_STATE);
       const plan = buildRoundPlan(selectedScore);
-      plan.statement = await generateLlamaStatement(env, plan, selectedScore);
+
+      const [quoteProbe, v4MarketSnapshot, aiContextSnippet] = await Promise.all([
+        fetchUniswapApiQuoteProbe({
+          config,
+          swapper: account.address,
+          tokenIn: selectedScore.pool.token0,
+          tokenOut: selectedScore.pool.token1,
+          amount: buildQuoteProbeAmount(selectedScore.pool.token0Decimals),
+        }).catch(() => null),
+        config.uniswapV4SubgraphUrl
+          ? fetchV4SubgraphMarketSnapshot(config.uniswapV4SubgraphUrl).catch(() => null)
+          : Promise.resolve<V4SubgraphMarketSnapshot | null>(null),
+        getCachedUniswapAiContext(env.AGENT_STATE, config).catch(() => null),
+      ]);
+
+      if (quoteProbe?.priceImpact !== undefined) {
+        if (quoteProbe.priceImpact >= 2) {
+          plan.confidence = clampNumber(plan.confidence - 0.18, 0, 1);
+          plan.durationSeconds = Math.trunc(clampNumber(plan.durationSeconds + 120, 300, 900));
+          plan.twapWindowSeconds = Math.trunc(clampNumber(plan.twapWindowSeconds + 45, 30, Math.min(300, plan.durationSeconds - 30)));
+        } else if (quoteProbe.includesV4 && quoteProbe.priceImpact <= 0.8) {
+          plan.confidence = clampNumber(plan.confidence + 0.06, 0, 1);
+          plan.durationSeconds = Math.trunc(clampNumber(plan.durationSeconds - 60, 300, 900));
+          plan.twapWindowSeconds = Math.trunc(clampNumber(plan.twapWindowSeconds - 30, 30, Math.min(300, plan.durationSeconds - 30)));
+        }
+      }
+
+      if (quoteProbe?.v4PoolIdValidated === false) {
+        plan.confidence = clampNumber(plan.confidence - 0.1, 0, 1);
+        plan.durationSeconds = Math.trunc(clampNumber(plan.durationSeconds + 60, 300, 900));
+      }
+
+      plan.statement = await generateLlamaStatement(env, aiContextSnippet, plan, selectedScore);
 
       analysis.selected.statement = plan.statement;
+      analysis.selected.confidence = clampRound(plan.confidence);
+      analysis.selected.durationSeconds = plan.durationSeconds;
+      analysis.selected.twapWindowSeconds = plan.twapWindowSeconds;
+      analysis.integrations = {
+        used: [
+          "uniswap-v3-onchain-rpc",
+          "uniswap-v3-sdk",
+          ...(config.uniswapV3SubgraphUrl ? ["uniswap-v3-subgraph"] : []),
+          ...(quoteProbe ? ["uniswap-trade-api"] : []),
+          ...(quoteProbe?.includesV4 ? ["uniswap-v4-routing"] : []),
+          ...(quoteProbe?.v4PoolIdValidated ? ["uniswap-v4-sdk-poolid-validation"] : []),
+          ...(v4MarketSnapshot ? ["uniswap-v4-subgraph"] : []),
+          ...(aiContextSnippet ? ["uniswap-ai-context"] : []),
+        ],
+        ...(quoteProbe ? { uniswapApiQuote: quoteProbe } : {}),
+        ...(v4MarketSnapshot ? { v4Market: v4MarketSnapshot } : {}),
+      };
 
       const txHash = await walletClient.writeContract({
         address: config.marketAddress,

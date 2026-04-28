@@ -3,8 +3,12 @@
 Cloudflare Worker + Llama-3.1 agent that:
 
 - Discovers Uniswap v3 pools on Sepolia from factory `PoolCreated` events.
+- Augments discovery with Uniswap v3 subgraph candidates (when configured).
 - Scores pools for prediction suitability (stability, manipulation resistance, profitability proxy).
 - Selects the best pool and sets round config (`duration` + `twapWindow`) within contract limits.
+- Probes Uniswap Trade API quotes (v3/v4 routing) to refine confidence and round timing.
+- Validates v4 route pool IDs with the official `@uniswap/v4-sdk`.
+- Uses `@uniswap/v3-sdk` price math for drift/quality signals.
 - Generates a short prediction statement with Workers AI (`@cf/meta/llama-3.1-8b-instruct`).
 - Calls `IntraPredictionMarket` on Sepolia to create rounds and resolve ended rounds.
 - Stores latest analysis and recent ended rounds in Cloudflare KV for the web app.
@@ -16,12 +20,13 @@ Cloudflare Worker + Llama-3.1 agent that:
 
 ## Analysis factors
 
-The agent uses onchain metrics only:
+The agent uses multiple Uniswap-native sources:
 
-- Stability: short-vs-long TWAP drift plus liquidity quality.
-- Manipulation resistance: pool liquidity and oracle observation depth.
-- Profitability proxy: recent swap activity and fee-tier attractiveness.
-- Signal quality: trend/momentum from recent TWAP and current tick.
+- Onchain RPC (Uniswap v3 pools): TWAP drift, liquidity, oracle depth, swap activity.
+- Uniswap SDKs: v3 tick-to-price drift and v4 pool-id validation.
+- Uniswap Trade API: quote route, v4 participation, and price impact diagnostics.
+- Uniswap subgraphs (optional): v3 candidate pools and v4 market-wide regime snapshot.
+- Uniswap AI context file (optional): prompt grounding for consistent terminology.
 
 Scoring output drives both pool selection and round setup:
 
@@ -59,15 +64,23 @@ npm test
 ```bash
 wrangler secret put SEPOLIA_RPC_URL
 wrangler secret put SEPOLIA_PRIVATE_KEY
+wrangler secret put UNISWAP_API_KEY
 ```
 
-3. Optional: protect manual trigger endpoint:
+3. Optional: set subgraph endpoints if you want deeper v3/v4 data in scoring:
+
+```bash
+wrangler secret put UNISWAP_V3_SUBGRAPH_URL
+wrangler secret put UNISWAP_V4_SUBGRAPH_URL
+```
+
+4. Optional: protect manual trigger endpoint:
 
 ```bash
 wrangler secret put RUN_AUTH_HEADER
 ```
 
-4. Deploy:
+5. Deploy:
 
 ```bash
 wrangler deploy

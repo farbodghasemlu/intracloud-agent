@@ -1,87 +1,70 @@
-# IntraCloud Agent (Phase 2)
+<p align="center">
+  <img src="./agent.png" alt="IntraCloud Agent" width="100%" />
+</p>
 
-Cloudflare Worker + Llama-3.1 agent that:
+<h1 align="center">IntraCloud Agent</h1>
 
-- Discovers Uniswap v3 pools on Sepolia from factory `PoolCreated` events.
-- Augments discovery with Uniswap v3 subgraph candidates (when configured).
-- Scores pools for prediction suitability (stability, manipulation resistance, profitability proxy).
-- Selects the best pool and sets round config (`duration` + `twapWindow`) within contract limits.
-- Probes Uniswap Trade API quotes (v3/v4 routing) to refine confidence and round timing.
-- Validates v4 route pool IDs with the official `@uniswap/v4-sdk`.
-- Uses `@uniswap/v3-sdk` price math for drift/quality signals.
-- Generates a short prediction statement with Workers AI (`@cf/meta/llama-3.1-8b-instruct`).
-- Calls `IntraPredictionMarket` on Sepolia to create rounds and resolve ended rounds.
-- Stores latest analysis and recent ended rounds in Cloudflare KV for the web app.
+<p align="center">
+  <strong>Autonomous Market Intelligence Engine · Cloudflare Workers + Llama-3.1</strong>
+</p>
 
-## Contract target
+---
 
-- Chain: Sepolia (`11155111`)
-- Contract: `0xEf16C4d27859F5D6Ab2506F7c3a1C0f199C18d89`
+## Overview
 
-## Analysis factors
+The IntraCloud Agent is a serverless autonomous actor deployed on Cloudflare Workers that continuously analyzes Uniswap v3/v4 pool dynamics to identify optimal prediction targets. It combines on-chain RPC inspection, Uniswap SDK price math, Trade API routing diagnostics, and subgraph-sourced liquidity signals into a composite scoring model—then autonomously deploys and resolves prediction rounds against the `IntraPredictionMarket` contract.
 
-The agent uses multiple Uniswap-native sources:
+The agent operates on a scheduled cadence: discover pools → score candidates → select the highest-signal pair → calibrate round parameters → create on-chain round → resolve expired rounds → persist analysis state.
 
-- Onchain RPC (Uniswap v3 pools): TWAP drift, liquidity, oracle depth, swap activity.
-- Uniswap SDKs: v3 tick-to-price drift and v4 pool-id validation.
-- Uniswap Trade API: quote route, v4 participation, and price impact diagnostics.
-- Uniswap subgraphs (optional): v3 candidate pools and v4 market-wide regime snapshot.
-- Uniswap AI context file (optional): prompt grounding for consistent terminology.
+## Capabilities
 
-Scoring output drives both pool selection and round setup:
+- **Pool Discovery** — Indexes `PoolCreated` events from Uniswap v3 Factory on Sepolia; augments candidate set via v3 subgraph when configured
+- **Multi-Source Scoring** — Evaluates TWAP drift, oracle cardinality, liquidity depth, swap frequency, and manipulation resistance across on-chain and off-chain sources
+- **Trade API Integration** — Probes Uniswap Trade API for v3/v4 route quality, price impact diagnostics, and routing confidence signals
+- **SDK Validation** — Uses `@uniswap/v3-sdk` for tick-to-price drift computation and `@uniswap/v4-sdk` for pool ID verification on v4-routed quotes
+- **Autonomous Round Management** — Selects duration (5–15 min) and TWAP window (30–300s) based on pool volatility profile; creates and resolves rounds via contract calls
+- **Prediction Generation** — Produces directional price statements via Workers AI (`@cf/meta/llama-3.1-8b-instruct`) grounded in quantitative analysis
+- **State Persistence** — Stores latest analysis summaries and recent round history in Cloudflare KV for consumption by the web application
 
-- `duration`: clamped to `5-15` minutes.
-- `twapWindow`: clamped to `30-300` seconds and always `<= duration`.
+## Analysis Pipeline
 
-## Runtime endpoints
-
-- `GET /health`
-- `GET /analysis/latest`
-- `GET /rounds/recent`
-- `GET /stats`
-- `POST /run` (optional auth via `RUN_AUTH_HEADER`)
-
-## Local development
-
-```bash
-npm install
-cp .dev.vars.example .dev.vars
-npm run dev
+```
+Uniswap v3 Factory Events ─┐
+Uniswap v3 Subgraph ───────┤
+Uniswap Trade API ──────────┼──▶ Composite Scoring ──▶ Pool Selection ──▶ Round Creation
+Uniswap v3 SDK (price) ────┤                              │
+Uniswap v4 SDK (pool ID) ──┘                              ▼
+                                                    On-Chain Settlement
 ```
 
-## Verification
+## Scoring Dimensions
 
-```bash
-npm run typecheck
-npm test
-```
+| Factor | Source | Signal |
+|--------|--------|--------|
+| TWAP Stability | On-chain `observe()` | Low drift indicates oracle reliability |
+| Oracle Depth | On-chain cardinality | Higher cardinality = harder to manipulate |
+| Liquidity Depth | RPC + Subgraph | Deeper liquidity resists price manipulation |
+| Swap Frequency | Subgraph volume data | Active pools produce meaningful price movement |
+| Route Quality | Trade API quotes | v3/v4 routing confidence and price impact |
+| v4 Participation | Trade API + v4 SDK | Cross-version liquidity availability |
 
-## Deployment
+## API Surface
 
-1. Create and bind a KV namespace (`AGENT_STATE`) and set `id`/`preview_id` in `wrangler.toml`.
-2. Set Worker secrets:
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | `GET` | Runtime health check |
+| `/analysis/latest` | `GET` | Most recent pool analysis and prediction rationale |
+| `/rounds/recent` | `GET` | Recently completed prediction rounds |
+| `/stats` | `GET` | Aggregate platform statistics |
+| `/run` | `POST` | Manual trigger (authenticated) |
 
-```bash
-wrangler secret put SEPOLIA_RPC_URL
-wrangler secret put SEPOLIA_PRIVATE_KEY
-wrangler secret put UNISWAP_API_KEY
-```
+## Target Contract
 
-3. Optional: set subgraph endpoints if you want deeper v3/v4 data in scoring:
+| Parameter | Value |
+|-----------|-------|
+| Network | Sepolia (`11155111`) |
+| Contract | `0xEf16C4d27859F5D6Ab2506F7c3a1C0f199C18d89` |
 
-```bash
-wrangler secret put UNISWAP_V3_SUBGRAPH_URL
-wrangler secret put UNISWAP_V4_SUBGRAPH_URL
-```
+## License
 
-4. Optional: protect manual trigger endpoint:
-
-```bash
-wrangler secret put RUN_AUTH_HEADER
-```
-
-5. Deploy:
-
-```bash
-wrangler deploy
-```
+MIT
